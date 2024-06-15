@@ -7,9 +7,11 @@ local LrExportSession = import 'LrExportSession'
 local LrStringUtils = import 'LrStringUtils'
 local LrPathUtils = import 'LrPathUtils'
 
--- Load configuration and JSON library
+-- Load configuration, secrets, and JSON library
 local configPath = LrPathUtils.child(_PLUGIN.path, 'config.lua')
 local config = dofile(configPath)
+local secretsPath = LrPathUtils.child(_PLUGIN.path, 'secrets.lua')
+local secrets = dofile(secretsPath)
 local dkjsonPath = LrPathUtils.child(_PLUGIN.path, 'dkjson.lua')
 local json = dofile(dkjsonPath)
 
@@ -55,7 +57,7 @@ local function encodePhotoToBase64(filePath)
 end
 
 local function requestAltTextFromOpenAI(imageBase64)
-    local apiKey = config.OPENAI_API_KEY
+    local apiKey = secrets.OPENAI_API_KEY
     local url = "https://api.openai.com/v1/chat/completions"
     local headers = {
         { field = "Content-Type", value = "application/json" },
