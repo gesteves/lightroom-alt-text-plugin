@@ -7,6 +7,8 @@ local LrExportSession = import 'LrExportSession'
 local LrStringUtils = import 'LrStringUtils'
 local LrPathUtils = import 'LrPathUtils'
 local LrPrefs = import 'LrPrefs'
+local LrFunctionContext = import 'LrFunctionContext'
+local LrProgressScope = import 'LrProgressScope'
 
 -- Load configuration and JSON library
 local configPath = LrPathUtils.child(_PLUGIN.path, 'config.lua')
@@ -15,7 +17,8 @@ local prefs = LrPrefs.prefsForPlugin()
 local dkjsonPath = LrPathUtils.child(_PLUGIN.path, 'dkjson.lua')
 local json = dofile(dkjsonPath)
 
-local function resizePhoto(photo)
+local function resizePhoto(photo, progressScope)
+    progressScope:setCaption("Resizing photo...")
     local tempDir = LrPathUtils.getStandardFilePath('temp')
     local exportSettings = {
         LR_export_destinationType = 'specificFolder',
@@ -47,7 +50,8 @@ local function resizePhoto(photo)
     return nil
 end
 
-local function encodePhotoToBase64(filePath)
+local function encodePhotoToBase64(filePath, progressScope)
+    progressScope:setCaption("Encoding photo...")
     local file = io.open(filePath, "rb") -- r read mode and b binary mode
     local data = file:read("*all") -- *all reads the whole file
     file:close()
@@ -56,7 +60,8 @@ local function encodePhotoToBase64(filePath)
     return base64
 end
 
-local function requestAltTextFromOpenAI(imageBase64)
+local function requestAltTextFromOpenAI(imageBase64, progressScope)
+    progressScope:setCaption("Requesting alt text from OpenAI...")
     local apiKey = prefs.openaiApiKey
     if not apiKey then
         LrDialogs.message("OpenAI API Key not set. Please set it in the plugin manager.")
@@ -96,59 +101,69 @@ local function requestAltTextFromOpenAI(imageBase64)
     return nil
 end
 
-local function retryResizePhoto(photo, maxRetries, delay)
+local function generateAltTextForPhoto(photo, progressScope)
+    local maxRetries = 3
+    local delay = 1 -- 1 second delay between retries
+
+    local resizedFilePath = nil
     for attempt = 1, maxRetries do
-        local resizedFilePath = resizePhoto(photo)
+        resizedFilePath = resizePhoto(photo, progressScope)
         if resizedFilePath then
-            return resizedFilePath
+            break
         else
             if attempt < maxRetries then
                 LrTasks.sleep(delay) -- Delay before retrying
             end
         end
     end
-    return nil
-end
-
-local function generateAltTextForPhoto(photo)
-    local maxRetries = 3
-    local delay = 1 -- 1 second delay between retries
-
-    local resizedFilePath = retryResizePhoto(photo, maxRetries, delay)
     if not resizedFilePath then
         LrDialogs.message("Something went wrong, please try again!")
-        return
+        return false
     end
 
-    local base64Image = encodePhotoToBase64(resizedFilePath)
+    local base64Image = encodePhotoToBase64(resizedFilePath, progressScope)
     
-    local response = requestAltTextFromOpenAI(base64Image)
+    local response = requestAltTextFromOpenAI(base64Image, progressScope)
     
     if response and response.choices and response.choices[1] and response.choices[1].message and response.choices[1].message.content then
         local altText = response.choices[1].message.content:match("^%s*(.-)%s*$") -- Trim whitespace
-        LrTasks.startAsyncTask(function()
-            photo.catalog:withWriteAccessDo("Set Alt Text", function()
-                photo:setRawMetadata('caption', altText)
-            end)
-            LrDialogs.showBezel("Alt text generated and saved to caption.")
+        photo.catalog:withWriteAccessDo("Set Alt Text", function()
+            photo:setRawMetadata('caption', altText)
         end)
+        LrDialogs.showBezel("Alt text generated and saved to caption.")
+        return true
     else
         LrDialogs.message("Something went wrong, please try again!")
+        return false
     end
 
     LrFileUtils.delete(resizedFilePath) -- Clean up the resized image
 end
 
 LrTasks.startAsyncTask(function()
-    local catalog = LrApplication.activeCatalog()
-    local selectedPhotos = catalog:getTargetPhotos()
-    
-    if #selectedPhotos == 0 then
-        LrDialogs.message("Please select at least one photo.")
-        return
-    end
-    
-    for _, photo in ipairs(selectedPhotos) do
-        generateAltTextForPhoto(photo)
-    end
+    LrFunctionContext.callWithContext("GenerateAltText", function(context)
+        local catalog = LrApplication.activeCatalog()
+        local selectedPhotos = catalog:getTargetPhotos()
+        
+        if #selectedPhotos == 0 then
+            LrDialogs.message("Please select at least one photo.")
+            return
+        end
+        
+        local progressScope = LrProgressScope({
+            title = "Generating Alt Text",
+            functionContext = context,
+        })
+
+        local totalPhotos = #selectedPhotos
+        for i, photo in ipairs(selectedPhotos) do
+            progressScope:setPortionComplete(i - 1, totalPhotos)
+            if not generateAltTextForPhoto(photo, progressScope) then
+                break
+            end
+            progressScope:setPortionComplete(i, totalPhotos)
+        end
+
+        progressScope:done()
+    end)
 end)
