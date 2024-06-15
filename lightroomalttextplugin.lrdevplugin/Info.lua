@@ -3,17 +3,17 @@ return {
   LrSdkMinimumVersion = 6.0,
   LrPluginName = "Alt Text Generator",
   LrToolkitIdentifier = "com.example.lightroom.alttextgenerator",
-  LrPluginInfoUrl = "http://www.example.com",
+  LrPluginInfoUrl = "https://github.com/gesteves/lightroom-alt-text-plugin",
   LrInitPlugin = "AltTextGenerator.lua",
   LrLibraryMenuItems = {
       {
-          title = "Generate Alt Text",
+          title = "Generate Alt Text with ChatGPT",
           file = "AltTextGenerator.lua",
       },
   },
   LrExportMenuItems = {
       {
-          title = "Generate Alt Text",
+          title = "Generate Alt Text with ChatGPT",
           file = "AltTextGenerator.lua",
       },
   },
