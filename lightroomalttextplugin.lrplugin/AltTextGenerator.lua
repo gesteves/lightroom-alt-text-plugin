@@ -95,10 +95,27 @@ local function requestAltTextFromOpenAI(imageBase64, progressScope)
     }
     local bodyJson = json.encode(body)
     local response, hdrs = LrHttp.post(url, bodyJson, headers)
-    if response then
-        return json.decode(response)
+
+    if not response then
+        progressScope:done()
+        LrDialogs.message("Failed to get a response from OpenAI API.")
+        return nil
     end
-    return nil
+
+    local result, decodeError = pcall(function() return json.decode(response) end)
+    if not result then
+        progressScope:done()
+        LrDialogs.message("Failed to decode response from OpenAI API: " .. (decodeError or "Unknown error"))
+        return nil
+    end
+
+    if response.error then
+        progressScope:done()
+        LrDialogs.message("OpenAI API error: " .. (response.error.message or "Unknown error"))
+        return nil
+    end
+
+    return response
 end
 
 local function generateAltTextForPhoto(photo, progressScope)
