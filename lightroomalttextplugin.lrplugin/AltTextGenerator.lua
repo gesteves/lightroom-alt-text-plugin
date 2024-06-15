@@ -64,7 +64,7 @@ local function requestAltTextFromOpenAI(imageBase64, progressScope)
     progressScope:setCaption("Requesting alt text from OpenAI...")
     local apiKey = prefs.openaiApiKey
     if not apiKey then
-        LrDialogs.message("OpenAI API Key not set. Please set it in the plugin manager.")
+        LrDialogs.message("Your OpenAI API key is missing. Please set it up in the plugin manager.")
         return nil
     end
 
