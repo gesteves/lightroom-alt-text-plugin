@@ -6,6 +6,7 @@ local LrFileUtils = import 'LrFileUtils'
 local LrExportSession = import 'LrExportSession'
 local LrStringUtils = import 'LrStringUtils'
 local LrPathUtils = import 'LrPathUtils'
+local LrErrors = import 'LrErrors'
 
 -- Load configuration, secrets, and JSON library
 local configPath = LrPathUtils.child(_PLUGIN.path, 'config.lua')
@@ -44,7 +45,7 @@ local function resizePhoto(photo)
         end
     end
 
-    error("Failed to resize the photo")
+    return nil
 end
 
 local function encodePhotoToBase64(filePath)
@@ -91,8 +92,30 @@ local function requestAltTextFromOpenAI(imageBase64)
     return nil
 end
 
+local function retryResizePhoto(photo, maxRetries, delay)
+    for attempt = 1, maxRetries do
+        local resizedFilePath = resizePhoto(photo)
+        if resizedFilePath then
+            return resizedFilePath
+        else
+            if attempt < maxRetries then
+                LrTasks.sleep(delay) -- Delay before retrying
+            end
+        end
+    end
+    return nil
+end
+
 local function generateAltTextForPhoto(photo)
-    local resizedFilePath = resizePhoto(photo)
+    local maxRetries = 3
+    local delay = 1 -- 1 second delay between retries
+
+    local resizedFilePath = retryResizePhoto(photo, maxRetries, delay)
+    if not resizedFilePath then
+        LrDialogs.message("Something went wrong, please try again!")
+        return
+    end
+
     local base64Image = encodePhotoToBase64(resizedFilePath)
     
     local response = requestAltTextFromOpenAI(base64Image)
@@ -106,7 +129,7 @@ local function generateAltTextForPhoto(photo)
             LrDialogs.showBezel("Alt text generated and saved to caption.")
         end)
     else
-        LrDialogs.message("Failed to generate alt text.")
+        LrDialogs.message("Something went wrong, please try again!")
     end
 
     LrFileUtils.delete(resizedFilePath) -- Clean up the resized image
