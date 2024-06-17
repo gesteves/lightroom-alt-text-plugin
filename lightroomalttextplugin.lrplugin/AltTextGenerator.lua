@@ -126,12 +126,19 @@ local function generateAltTextForPhoto(photo, progressScope)
     local response = requestAltTextFromOpenAI(base64Image, progressScope)
     
     if response and response.choices and response.choices[1] and response.choices[1].message and response.choices[1].message.content then
-        local altText = response.choices[1].message.content:match("^%s*(.-)%s*$") -- Trim whitespace
-        photo.catalog:withWriteAccessDo("Set Alt Text", function()
-            photo:setRawMetadata('caption', altText)
-        end)
-        LrDialogs.showBezel("Alt text generated and saved to caption.")
-        return true
+        local altTextJson = response.choices[1].message.content:match("^%s*(.-)%s*$") -- Trim whitespace
+        local altTextData = json.decode(altTextJson)
+        if altTextData and altTextData.altText then
+            local altText = altTextData.altText
+            photo.catalog:withWriteAccessDo("Set Alt Text", function()
+                photo:setRawMetadata('caption', altText)
+            end)
+            LrDialogs.showBezel("Alt text generated and saved to caption.")
+            return true
+        else
+            LrDialogs.message("Failed to get alt text from OpenAI response.")
+            return false
+        end
     else
         LrDialogs.message("Something went wrong, please try again!")
         return false
