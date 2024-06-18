@@ -1,4 +1,4 @@
-This is a hacky plugin for Lightroom Classic that generates alt text for photos using ChatGPT-4o and saves it to the caption field in the photo's exif data.
+This is a plugin for Lightroom Classic that generates alt text for photos using ChatGPT-4o and saves it to the alt text field in the photo's IPTC metadata.
 
 To use it:
 
@@ -8,4 +8,4 @@ To use it:
 4. Paste the OpenAI API key in the settings section, and click "done"
 5. Select an image, go to Library > Plug-in Extras > Generate Alt Text with ChatGPT
 6. Wait a few seconds, a message will let you know when the alt text has been generated
-7. Inspect the caption in the photo's metadata, and adjust as needed
+7. Inspect the alt text in the photo's metadata, and edit as needed
