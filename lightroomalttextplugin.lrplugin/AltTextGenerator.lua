@@ -131,7 +131,7 @@ local function generateAltTextForPhoto(photo, progressScope)
         if altTextData and altTextData.altText then
             local altText = altTextData.altText
             photo.catalog:withWriteAccessDo("Set Alt Text", function()
-                photo:setRawMetadata('caption', altText)
+                photo:setRawMetadata('altTextAccessibility', altText)
             end)
             LrDialogs.showBezel("Alt text generated and saved to caption.")
             return true
