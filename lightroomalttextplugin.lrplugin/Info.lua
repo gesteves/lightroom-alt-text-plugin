@@ -11,12 +11,6 @@ return {
           file = "AltTextGenerator.lua",
       },
   },
-  LrExportMenuItems = {
-      {
-          title = "Generate Alt Text with ChatGPT",
-          file = "AltTextGenerator.lua",
-      },
-  },
   LrPluginInfoProvider = 'PluginInfoProvider.lua',
   VERSION = { major=1, minor=0, revision=0, build=1, },
 }
