@@ -20,6 +20,13 @@ local json = dofile(dkjsonPath)
 local function resizePhoto(photo, progressScope)
     progressScope:setCaption("Resizing photo...")
     local tempDir = LrPathUtils.getStandardFilePath('temp')
+    local photoName = LrPathUtils.leafName(photo:getFormattedMetadata('fileName'))
+    local resizedPhotoPath = LrPathUtils.child(tempDir, photoName)
+
+    if LrFileUtils.exists(resizedPhotoPath) then
+        return nil
+    end
+
     local exportSettings = {
         LR_export_destinationType = 'specificFolder',
         LR_export_destinationPathPrefix = tempDir,
@@ -50,15 +57,22 @@ local function resizePhoto(photo, progressScope)
     return nil
 end
 
+
 local function encodePhotoToBase64(filePath, progressScope)
     progressScope:setCaption("Encoding photo...")
-    local file = io.open(filePath, "rb") -- r read mode and b binary mode
-    local data = file:read("*all") -- *all reads the whole file
+
+    local file = io.open(filePath, "rb")
+    if not file then
+        return nil
+    end
+
+    local data = file:read("*all")
     file:close()
 
     local base64 = LrStringUtils.encodeBase64(data)
     return base64
 end
+
 
 local function requestAltTextFromOpenAI(imageBase64, progressScope)
     progressScope:setCaption("Requesting alt text from OpenAI...")
@@ -102,26 +116,19 @@ local function requestAltTextFromOpenAI(imageBase64, progressScope)
 end
 
 local function generateAltTextForPhoto(photo, progressScope)
-    local maxRetries = 3
-    local delay = 1 -- 1 second delay between retries
+    resizedFilePath = resizePhoto(photo, progressScope)
 
-    local resizedFilePath = nil
-    for attempt = 1, maxRetries do
-        resizedFilePath = resizePhoto(photo, progressScope)
-        if resizedFilePath then
-            break
-        else
-            if attempt < maxRetries then
-                LrTasks.sleep(delay) -- Delay before retrying
-            end
-        end
-    end
     if not resizedFilePath then
-        LrDialogs.message("Something went wrong, please try again!")
         return false
     end
 
     local base64Image = encodePhotoToBase64(resizedFilePath, progressScope)
+
+    if not base64Image then
+        return nil
+    end
+
+    LrFileUtils.delete(resizedFilePath)
     
     local response = requestAltTextFromOpenAI(base64Image, progressScope)
     
@@ -143,8 +150,6 @@ local function generateAltTextForPhoto(photo, progressScope)
         LrDialogs.message("Something went wrong, please try again!")
         return false
     end
-
-    LrFileUtils.delete(resizedFilePath) -- Clean up the resized image
 end
 
 LrTasks.startAsyncTask(function()
