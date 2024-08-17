@@ -125,7 +125,7 @@ local function generateAltTextForPhoto(photo, progressScope)
     local base64Image = encodePhotoToBase64(resizedFilePath, progressScope)
 
     if not base64Image then
-        return nil
+        return false
     end
 
     LrFileUtils.delete(resizedFilePath)
