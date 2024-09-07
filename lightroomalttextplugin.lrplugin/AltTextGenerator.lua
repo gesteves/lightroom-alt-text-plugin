@@ -89,6 +89,9 @@ local function requestAltTextFromOpenAI(imageBase64, progressScope)
     }
     local body = {
         model = "gpt-4o",
+        response_format = {
+            type = "json_object"
+        },
         messages = {
             {
                 role = "system",
