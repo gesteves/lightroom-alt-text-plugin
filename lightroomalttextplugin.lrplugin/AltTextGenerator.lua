@@ -9,8 +9,11 @@ local LrPathUtils = import 'LrPathUtils'
 local LrPrefs = import 'LrPrefs'
 local LrFunctionContext = import 'LrFunctionContext'
 local LrProgressScope = import 'LrProgressScope'
+local LrLogger = import 'LrLogger'
 
--- Load configuration and JSON library
+local logger = LrLogger('AltTextPlugin')
+logger:enable("logfile")
+
 local configPath = LrPathUtils.child(_PLUGIN.path, 'config.lua')
 local config = dofile(configPath)
 local prefs = LrPrefs.prefsForPlugin()
@@ -57,7 +60,6 @@ local function resizePhoto(photo, progressScope)
     return nil
 end
 
-
 local function encodePhotoToBase64(filePath, progressScope)
     progressScope:setCaption("Encoding photo...")
 
@@ -69,10 +71,8 @@ local function encodePhotoToBase64(filePath, progressScope)
     local data = file:read("*all")
     file:close()
 
-    local base64 = LrStringUtils.encodeBase64(data)
-    return base64
+    return LrStringUtils.encodeBase64(data)
 end
-
 
 local function requestAltTextFromOpenAI(imageBase64, progressScope)
     progressScope:setCaption("Requesting alt text from OpenAI...")
@@ -82,101 +82,126 @@ local function requestAltTextFromOpenAI(imageBase64, progressScope)
         return nil
     end
 
-    local url = "https://api.openai.com/v1/chat/completions"
+    local url = "https://api.openai.com/v1/responses"
     local headers = {
         { field = "Content-Type", value = "application/json" },
         { field = "Authorization", value = "Bearer " .. apiKey },
     }
+
     local body = {
-        model = "gpt-4o",
-        response_format = {
-            type = "json_object"
-        },
-        messages = {
-            {
-                role = "system",
-                content = config.SYSTEM_PROMPT
-            },
+        model = "gpt-4.1",
+        store = false,
+        instructions = config.INSTRUCTIONS,
+        user = "lightroom-plugin",
+        input = {
             {
                 role = "user",
                 content = {
                     {
-                        type = "image_url",
-                        image_url = {
-                            url = "data:image/jpeg;base64," .. imageBase64
-                        }
+                        type = "input_image",
+                        image_url = "data:image/jpeg;base64," .. imageBase64
                     }
+                }
+            }
+        },
+        text = {
+            format = {
+                type = "json_schema",
+                name = "alt_text",
+                schema = {
+                    type = "object",
+                    properties = {
+                        altText = { type = "string" }
+                    },
+                    required = { "altText" },
+                    additionalProperties = false
                 }
             }
         }
     }
+
     local bodyJson = json.encode(body)
-    local response, hdrs = LrHttp.post(url, bodyJson, headers)
-    if response then
-        return json.decode(response)
+    local response, _ = LrHttp.post(url, bodyJson, headers)
+
+    if not response then
+        LrDialogs.message("No response from OpenAI. Please try again.")
+        return nil
     end
+
+    local ok, decoded = pcall(json.decode, response)
+    if not ok then
+        logger:trace("Failed to parse OpenAI response: " .. tostring(response))
+        LrDialogs.message("Invalid response from OpenAI.")
+        return nil
+    end
+
+    -- Check for API error
+    if decoded.error and decoded.error.message then
+        logger:trace("OpenAI API error:\n" .. json.encode(decoded, { indent = true }))
+        LrDialogs.message("OpenAI error: " .. decoded.error.message)
+        return nil
+    end
+
+    -- Normal success path
+    local outputs = decoded.output or {}
+    for _, output in ipairs(outputs) do
+        if output.role == "assistant" and output.content and output.content[1] and output.content[1].text then
+            return json.decode(output.content[1].text)
+        end
+    end
+
+    LrDialogs.message("OpenAI returned an unexpected response.")
     return nil
 end
 
 local function generateAltTextForPhoto(photo, progressScope)
-    resizedFilePath = resizePhoto(photo, progressScope)
-
+    local resizedFilePath = resizePhoto(photo, progressScope)
     if not resizedFilePath then
         return false
     end
 
     local base64Image = encodePhotoToBase64(resizedFilePath, progressScope)
-
     if not base64Image then
         return false
     end
 
     LrFileUtils.delete(resizedFilePath)
-    
+
     local response = requestAltTextFromOpenAI(base64Image, progressScope)
-    
-    if response and response.choices and response.choices[1] and response.choices[1].message and response.choices[1].message.content then
-        local altTextJson = response.choices[1].message.content:match("^%s*(.-)%s*$") -- Trim whitespace
-        local altTextData = json.decode(altTextJson)
-        if altTextData and altTextData.altText then
-            local altText = altTextData.altText
-            photo.catalog:withWriteAccessDo("Set Alt Text", function()
-                photo:setRawMetadata('caption', altText)
-            end)
-            LrDialogs.showBezel("Alt text generated and saved to caption.")
-            return true
-        else
-            LrDialogs.message("Failed to get alt text from OpenAI response.")
-            return false
-        end
-    else
-        LrDialogs.message("Something went wrong, please try again!")
-        return false
+
+    if response and response.altText then
+        local altText = response.altText
+        photo.catalog:withWriteAccessDo("Set Alt Text", function()
+            photo:setRawMetadata('caption', altText)
+        end)
+        LrDialogs.showBezel("Alt text generated and saved to caption.")
+        return true
     end
+
+    return false
 end
 
 LrTasks.startAsyncTask(function()
     LrFunctionContext.callWithContext("GenerateAltText", function(context)
         local catalog = LrApplication.activeCatalog()
         local selectedPhotos = catalog:getTargetPhotos()
-        
+
         if #selectedPhotos == 0 then
             LrDialogs.message("Please select at least one photo.")
             return
         end
-        
+
         local progressScope = LrProgressScope({
             title = "Generating Alt Text",
             functionContext = context,
         })
 
-        local totalPhotos = #selectedPhotos
         for i, photo in ipairs(selectedPhotos) do
-            progressScope:setPortionComplete(i - 1, totalPhotos)
+            progressScope:setPortionComplete(i - 1, #selectedPhotos)
             if not generateAltTextForPhoto(photo, progressScope) then
                 break
             end
-            progressScope:setPortionComplete(i, totalPhotos)
+            progressScope:setPortionComplete(i, #selectedPhotos)
         end
 
         progressScope:done()

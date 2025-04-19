@@ -3,7 +3,7 @@ This is a plugin for Lightroom Classic that generates alt text for photos using 
 To use it:
 
 1. Clone this repo
-2. Get an OpenAI API key at https://platform.openai.com/api-keys (make sure it has access to the `gpt-4o` model)
+2. Get an OpenAI API key at https://platform.openai.com/api-keys (make sure it has access to the `gpt-4.1` model)
 3. Open Lightroom Classic, go to File > Plug-in Manager > Add, and select the `lightroomalttextplugin.lrplugin` folder in this repo
 4. Paste the OpenAI API key in the settings section, and click "done"
 5. Select an image, go to Library > Plug-in Extras > Generate Alt Text with ChatGPT
