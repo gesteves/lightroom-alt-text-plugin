@@ -89,7 +89,7 @@ local function requestAltTextFromOpenAI(imageBase64, progressScope)
     }
 
     local body = {
-        model = "gpt-4.1",
+        model = "gpt-5.1",
         store = false,
         instructions = config.INSTRUCTIONS,
         user = "lightroom-plugin",
