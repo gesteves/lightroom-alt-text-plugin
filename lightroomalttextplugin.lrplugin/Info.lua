@@ -4,7 +4,6 @@ return {
   LrPluginName = "Alt Text Generator",
   LrToolkitIdentifier = "com.example.lightroom.alttextgenerator",
   LrPluginInfoUrl = "https://github.com/gesteves/lightroom-alt-text-plugin",
-  LrInitPlugin = "AltTextGenerator.lua",
   LrLibraryMenuItems = {
       {
           title = "Generate Alt Text with Claude",
