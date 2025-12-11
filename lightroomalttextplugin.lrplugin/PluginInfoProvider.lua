@@ -14,12 +14,12 @@ return {
                 title = "Alt Text Generator Settings",
                 f:row {
                     f:static_text {
-                        title = "OpenAI API Key:",
+                        title = "Claude API Key:",
                         alignment = 'right',
                         width = share 'label_width',
                     },
                     f:edit_field {
-                        value = bind { key = 'openaiApiKey', object = prefs },
+                        value = bind { key = 'claudeApiKey', object = prefs },
                         width_in_chars = 50,
                     },
                 },

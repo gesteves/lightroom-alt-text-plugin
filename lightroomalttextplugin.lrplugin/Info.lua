@@ -7,10 +7,10 @@ return {
   LrInitPlugin = "AltTextGenerator.lua",
   LrLibraryMenuItems = {
       {
-          title = "Generate Alt Text with ChatGPT",
+          title = "Generate Alt Text with Claude",
           file = "AltTextGenerator.lua",
       },
   },
   LrPluginInfoProvider = 'PluginInfoProvider.lua',
-  VERSION = { major=1, minor=0, revision=0, build=7, },
+  VERSION = { major=2, minor=0, revision=0, build=0, },
 }

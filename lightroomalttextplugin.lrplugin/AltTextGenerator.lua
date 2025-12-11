@@ -27,7 +27,7 @@ local function resizePhoto(photo, progressScope)
     local resizedPhotoPath = LrPathUtils.child(tempDir, photoName)
 
     if LrFileUtils.exists(resizedPhotoPath) then
-        return nil
+        LrFileUtils.delete(resizedPhotoPath)
     end
 
     local exportSettings = {
@@ -39,8 +39,8 @@ local function resizePhoto(photo, progressScope)
         LR_minimizeEmbeddedMetadata = true,
         LR_outputSharpeningOn = false,
         LR_size_doConstrain = true,
-        LR_size_maxHeight = 2000,
-        LR_size_maxWidth = 2000,
+        LR_size_maxHeight = 1024,
+        LR_size_maxWidth = 1024,
         LR_size_resizeType = 'wh',
         LR_size_units = 'pixels',
     }
@@ -74,47 +74,41 @@ local function encodePhotoToBase64(filePath, progressScope)
     return LrStringUtils.encodeBase64(data)
 end
 
-local function requestAltTextFromOpenAI(imageBase64, progressScope)
-    progressScope:setCaption("Requesting alt text from OpenAI...")
-    local apiKey = prefs.openaiApiKey
-    if not apiKey then
-        LrDialogs.message("Your OpenAI API key is missing. Please set it up in the plugin manager.")
+local function requestAltTextFromClaude(imageBase64, progressScope)
+    progressScope:setCaption("Requesting alt text from Claude...")
+    local apiKey = prefs.claudeApiKey
+    if not apiKey or apiKey == "" then
+        LrDialogs.message("Your Claude API key is missing. Please set it up in the plugin manager.")
         return nil
     end
 
-    local url = "https://api.openai.com/v1/responses"
+    local url = "https://api.anthropic.com/v1/messages"
     local headers = {
         { field = "Content-Type", value = "application/json" },
-        { field = "Authorization", value = "Bearer " .. apiKey },
+        { field = "x-api-key", value = apiKey },
+        { field = "anthropic-version", value = "2023-06-01" },
     }
 
     local body = {
-        model = "gpt-5.1",
-        store = false,
-        instructions = config.INSTRUCTIONS,
-        user = "lightroom-plugin",
-        input = {
+        model = "claude-sonnet-4-5",
+        max_tokens = 1024,
+        system = config.INSTRUCTIONS,
+        messages = {
             {
                 role = "user",
                 content = {
                     {
-                        type = "input_image",
-                        image_url = "data:image/jpeg;base64," .. imageBase64
-                    }
-                }
-            }
-        },
-        text = {
-            format = {
-                type = "json_schema",
-                name = "alt_text",
-                schema = {
-                    type = "object",
-                    properties = {
-                        altText = { type = "string" }
+                        type = "image",
+                        source = {
+                            type = "base64",
+                            media_type = "image/jpeg",
+                            data = imageBase64
+                        }
                     },
-                    required = { "altText" },
-                    additionalProperties = false
+                    {
+                        type = "text",
+                        text = "Please generate alt text for this image."
+                    }
                 }
             }
         }
@@ -124,33 +118,33 @@ local function requestAltTextFromOpenAI(imageBase64, progressScope)
     local response, _ = LrHttp.post(url, bodyJson, headers)
 
     if not response then
-        LrDialogs.message("No response from OpenAI. Please try again.")
+        LrDialogs.message("No response from Claude. Please try again.")
         return nil
     end
 
     local ok, decoded = pcall(json.decode, response)
     if not ok then
-        logger:trace("Failed to parse OpenAI response: " .. tostring(response))
-        LrDialogs.message("Invalid response from OpenAI.")
+        logger:trace("Failed to parse Claude response: " .. tostring(response))
+        LrDialogs.message("Invalid response from Claude.")
         return nil
     end
 
     -- Check for API error
     if decoded.error and decoded.error.message then
-        logger:trace("OpenAI API error:\n" .. json.encode(decoded, { indent = true }))
-        LrDialogs.message("OpenAI error: " .. decoded.error.message)
+        logger:trace("Claude API error:\n" .. json.encode(decoded, { indent = true }))
+        LrDialogs.message("Claude error: " .. decoded.error.message)
         return nil
     end
 
-    -- Normal success path
-    local outputs = decoded.output or {}
-    for _, output in ipairs(outputs) do
-        if output.role == "assistant" and output.content and output.content[1] and output.content[1].text then
-            return json.decode(output.content[1].text)
+    -- Normal success path - Claude returns content array with text blocks
+    local content = decoded.content or {}
+    for _, block in ipairs(content) do
+        if block.type == "text" and block.text then
+            return block.text
         end
     end
 
-    LrDialogs.message("OpenAI returned an unexpected response.")
+    LrDialogs.message("Claude returned an unexpected response.")
     return nil
 end
 
@@ -161,16 +155,15 @@ local function generateAltTextForPhoto(photo, progressScope)
     end
 
     local base64Image = encodePhotoToBase64(resizedFilePath, progressScope)
+    LrFileUtils.delete(resizedFilePath)
+
     if not base64Image then
         return false
     end
 
-    LrFileUtils.delete(resizedFilePath)
+    local altText = requestAltTextFromClaude(base64Image, progressScope)
 
-    local response = requestAltTextFromOpenAI(base64Image, progressScope)
-
-    if response and response.altText then
-        local altText = response.altText
+    if altText then
         photo.catalog:withWriteAccessDo("Set Alt Text", function()
             photo:setRawMetadata('caption', altText)
         end)
