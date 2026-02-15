@@ -1,4 +1,5 @@
 return {
+  MODEL = "claude-sonnet-4-5",
   INSTRUCTIONS = [[
 You are an expert at writing alt text for images for accessibility purposes. Your job is to receive an image and write a short alt text that describes its contents objectively.
 

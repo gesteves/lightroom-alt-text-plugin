@@ -20,6 +20,14 @@ local prefs = LrPrefs.prefsForPlugin()
 local dkjsonPath = LrPathUtils.child(_PLUGIN.path, 'dkjson.lua')
 local json = dofile(dkjsonPath)
 
+local function sanitizeForLog(str)
+    local apiKey = prefs.claudeApiKey
+    if apiKey and apiKey ~= "" and str then
+        return str:gsub(apiKey, "[REDACTED]")
+    end
+    return str or ""
+end
+
 local function resizePhoto(photo, progressScope)
     progressScope:setCaption("Resizing photo...")
     local tempDir = LrPathUtils.getStandardFilePath('temp')
@@ -76,22 +84,17 @@ end
 
 local function requestAltTextFromClaude(imageBase64, progressScope)
     progressScope:setCaption("Requesting alt text from Claude...")
-    local apiKey = prefs.claudeApiKey
-    if not apiKey or apiKey == "" then
-        LrDialogs.message("Your Claude API key is missing. Please set it up in the plugin manager.")
-        return nil
-    end
 
     local url = "https://api.anthropic.com/v1/messages"
     local headers = {
         { field = "Content-Type", value = "application/json" },
-        { field = "x-api-key", value = apiKey },
+        { field = "x-api-key", value = prefs.claudeApiKey },
         { field = "anthropic-version", value = "2023-06-01" },
     }
 
     local body = {
-        model = "claude-sonnet-4-5",
-        max_tokens = 1024,
+        model = config.MODEL,
+        max_tokens = 300,
         system = config.INSTRUCTIONS,
         messages = {
             {
@@ -118,25 +121,20 @@ local function requestAltTextFromClaude(imageBase64, progressScope)
     local response, _ = LrHttp.post(url, bodyJson, headers)
 
     if not response then
-        LrDialogs.message("No response from Claude. Please try again.")
-        return nil
+        return nil, "No response from Claude API"
     end
 
     local ok, decoded = pcall(json.decode, response)
     if not ok then
-        logger:trace("Failed to parse Claude response: " .. tostring(response))
-        LrDialogs.message("Invalid response from Claude.")
-        return nil
+        logger:trace("Failed to parse Claude response: " .. sanitizeForLog(response))
+        return nil, "Invalid response from Claude"
     end
 
-    -- Check for API error
     if decoded.error and decoded.error.message then
-        logger:trace("Claude API error:\n" .. json.encode(decoded, { indent = true }))
-        LrDialogs.message("Claude error: " .. decoded.error.message)
-        return nil
+        logger:trace("Claude API error: " .. sanitizeForLog(json.encode(decoded, { indent = true })))
+        return nil, "Claude error: " .. decoded.error.message
     end
 
-    -- Normal success path - Claude returns content array with text blocks
     local content = decoded.content or {}
     for _, block in ipairs(content) do
         if block.type == "text" and block.text then
@@ -144,34 +142,35 @@ local function requestAltTextFromClaude(imageBase64, progressScope)
         end
     end
 
-    LrDialogs.message("Claude returned an unexpected response.")
-    return nil
+    logger:trace("Claude returned unexpected response: " .. sanitizeForLog(json.encode(decoded, { indent = true })))
+    return nil, "Claude returned an unexpected response"
 end
 
 local function generateAltTextForPhoto(photo, progressScope)
+    local metadataField = prefs.metadataField or "caption"
+
     local resizedFilePath = resizePhoto(photo, progressScope)
     if not resizedFilePath then
-        return false
+        return false, "Failed to resize photo"
     end
 
     local base64Image = encodePhotoToBase64(resizedFilePath, progressScope)
     LrFileUtils.delete(resizedFilePath)
 
     if not base64Image then
-        return false
+        return false, "Failed to encode photo"
     end
 
-    local altText = requestAltTextFromClaude(base64Image, progressScope)
+    local altText, err = requestAltTextFromClaude(base64Image, progressScope)
 
     if altText then
         photo.catalog:withWriteAccessDo("Set Alt Text", function()
-            photo:setRawMetadata('caption', altText)
+            photo:setRawMetadata(metadataField, altText)
         end)
-        LrDialogs.showBezel("Alt text generated and saved to caption.")
         return true
     end
 
-    return false
+    return false, err or "Failed to generate alt text"
 end
 
 LrTasks.startAsyncTask(function()
@@ -184,19 +183,93 @@ LrTasks.startAsyncTask(function()
             return
         end
 
+        local apiKey = prefs.claudeApiKey
+        if not apiKey or apiKey == "" then
+            LrDialogs.message("Your Claude API key is missing. Please set it up in the plugin manager.")
+            return
+        end
+
+        local metadataField = prefs.metadataField or "caption"
+        local skipExisting = prefs.skipExisting or false
+
         local progressScope = LrProgressScope({
             title = "Generating Alt Text",
             functionContext = context,
         })
 
+        local successes = 0
+        local failures = 0
+        local skipped = 0
+        local errors = {}
+
         for i, photo in ipairs(selectedPhotos) do
-            progressScope:setPortionComplete(i - 1, #selectedPhotos)
-            if not generateAltTextForPhoto(photo, progressScope) then
+            if progressScope:isCanceled() then
                 break
             end
+
+            progressScope:setPortionComplete(i - 1, #selectedPhotos)
+
+            local shouldSkip = false
+            if skipExisting then
+                local existing = photo:getFormattedMetadata(metadataField)
+                if existing and existing ~= "" then
+                    shouldSkip = true
+                end
+            end
+
+            if shouldSkip then
+                skipped = skipped + 1
+            else
+                local success, err = generateAltTextForPhoto(photo, progressScope)
+                if success then
+                    successes = successes + 1
+                else
+                    failures = failures + 1
+                    if err then
+                        errors[err] = (errors[err] or 0) + 1
+                    end
+                end
+            end
+
             progressScope:setPortionComplete(i, #selectedPhotos)
         end
 
         progressScope:done()
+
+        if progressScope:isCanceled() then
+            local parts = {"Operation canceled."}
+            if successes > 0 then
+                table.insert(parts, successes .. " photo(s) completed before cancellation.")
+            end
+            LrDialogs.message(table.concat(parts, " "))
+        elseif failures == 0 and skipped == 0 then
+            LrDialogs.showBezel("Alt text generated for " .. successes .. " photo(s).")
+        else
+            local parts = {}
+            if successes > 0 then
+                table.insert(parts, successes .. " succeeded")
+            end
+            if failures > 0 then
+                table.insert(parts, failures .. " failed")
+            end
+            if skipped > 0 then
+                table.insert(parts, skipped .. " skipped")
+            end
+            local summary = table.concat(parts, ", ") .. "."
+
+            local errorDetails = {}
+            for err, count in pairs(errors) do
+                if count > 1 then
+                    table.insert(errorDetails, err .. " (" .. count .. "x)")
+                else
+                    table.insert(errorDetails, err)
+                end
+            end
+            if #errorDetails > 0 then
+                summary = summary .. "\n\n" .. table.concat(errorDetails, "\n")
+            end
+
+            LrDialogs.message("Alt Text Generator", summary)
+        end
     end)
 end)
