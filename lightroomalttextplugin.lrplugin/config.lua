@@ -1,5 +1,5 @@
 return {
-  MODEL = "claude-sonnet-4-6",
+  MODEL = "claude-sonnet-5",
   MAX_TOKENS = 512,
   ANTHROPIC_VERSION = "2023-06-01",
   DEFAULT_METADATA_FIELD = "caption",
