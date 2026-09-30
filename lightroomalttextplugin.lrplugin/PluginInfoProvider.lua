@@ -4,6 +4,7 @@ local LrBinding = import 'LrBinding'
 local LrPathUtils = import 'LrPathUtils'
 
 local config = dofile(LrPathUtils.child(_PLUGIN.path, 'config.lua'))
+local ApiKey = dofile(LrPathUtils.child(_PLUGIN.path, 'ApiKey.lua'))
 local prefs = LrPrefs.prefsForPlugin()
 
 if prefs.metadataField == nil then
@@ -15,7 +16,17 @@ if prefs.skipExisting == nil then
 end
 
 return {
-    sectionsForTopOfDialog = function(f)
+    -- The API key lives in encrypted storage (LrPasswords), not prefs, so the
+    -- field binds to the dialog's property table and is saved when it closes.
+    startDialog = function(propertyTable)
+        propertyTable.claudeApiKey = ApiKey.get() or ""
+    end,
+
+    endDialog = function(propertyTable)
+        ApiKey.set(propertyTable.claudeApiKey)
+    end,
+
+    sectionsForTopOfDialog = function(f, propertyTable)
         local bind = LrView.bind
         local share = LrView.share
 
@@ -29,7 +40,7 @@ return {
                         width = share 'label_width',
                     },
                     f:password_field {
-                        value = bind { key = 'claudeApiKey', object = prefs },
+                        value = bind { key = 'claudeApiKey', object = propertyTable },
                         width_in_chars = 50,
                     },
                 },

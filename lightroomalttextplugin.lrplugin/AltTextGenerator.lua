@@ -31,6 +31,18 @@ end
 
 local config = loadModule('config.lua')
 local json = loadModule('dkjson.lua')
+local ApiKey = loadModule('ApiKey.lua')
+
+local API_URL = "https://api.anthropic.com/v1/messages"
+
+-- Statuses worth retrying: timeouts, rate limits, server errors, and overload.
+local RETRYABLE_STATUS = {
+    [408] = true, [429] = true, [500] = true, [502] = true,
+    [503] = true, [504] = true, [529] = true,
+}
+
+-- Set once per run; used to authenticate requests and to scrub logs.
+local apiKey
 
 local function validateMetadataField(field)
     for _, item in ipairs(config.METADATA_FIELDS) do
@@ -41,14 +53,47 @@ local function validateMetadataField(field)
     return config.DEFAULT_METADATA_FIELD
 end
 
+-- Replaces every occurrence of the API key with a placeholder. Uses a plain-text
+-- search because API keys contain "-", which is a Lua pattern quantifier.
 local function sanitizeForLog(str)
-    local apiKey = prefs.claudeApiKey
-    if apiKey and apiKey ~= "" and str then
-        return str:gsub(apiKey, "[REDACTED]")
+    str = str or ""
+    if not apiKey or apiKey == "" then
+        return str
     end
-    return str or ""
+    local parts = {}
+    local pos = 1
+    while true do
+        local first, last = string.find(str, apiKey, pos, true)
+        if not first then
+            break
+        end
+        table.insert(parts, str:sub(pos, first - 1))
+        table.insert(parts, "[REDACTED]")
+        pos = last + 1
+    end
+    table.insert(parts, str:sub(pos))
+    return table.concat(parts)
 end
 
+local function getHeader(hdrs, name)
+    if not hdrs then
+        return nil
+    end
+    name = name:lower()
+    for _, header in ipairs(hdrs) do
+        if type(header) == "table" and header.field and header.field:lower() == name then
+            return header.value
+        end
+    end
+    return nil
+end
+
+local function isBlank(str)
+    return str == nil or LrStringUtils.trimWhitespace(str) == ""
+end
+
+-- Returns the rendered JPEG path and the temp folder holding it, or nil and an
+-- error message. The caller is responsible for deleting the temp folder.
 local function resizePhoto(photo, progressScope)
     progressScope:setCaption("Resizing photo...")
 
@@ -73,8 +118,8 @@ local function resizePhoto(photo, progressScope)
         LR_minimizeEmbeddedMetadata = true,
         LR_outputSharpeningOn = false,
         LR_size_doConstrain = true,
-        LR_size_maxHeight = 1024,
-        LR_size_maxWidth = 1024,
+        LR_size_maxHeight = config.MAX_IMAGE_DIMENSION,
+        LR_size_maxWidth = config.MAX_IMAGE_DIMENSION,
         LR_size_resizeType = 'wh',
         LR_size_units = 'pixels',
     }
@@ -84,14 +129,19 @@ local function resizePhoto(photo, progressScope)
         exportSettings = exportSettings
     })
 
+    local renderError
     for _, rendition in exportSession:renditions() do
-        local success, path = rendition:waitForRender()
+        -- On failure the second value is a message suitable for display, such as
+        -- the original file being missing.
+        local success, pathOrMessage = rendition:waitForRender()
         if success then
-            return path
+            return pathOrMessage, tempDir
         end
+        renderError = pathOrMessage
     end
 
-    return nil
+    LrFileUtils.delete(tempDir)
+    return nil, renderError or "Failed to resize photo"
 end
 
 local function encodePhotoToBase64(filePath, progressScope)
@@ -108,19 +158,47 @@ local function encodePhotoToBase64(filePath, progressScope)
     return LrStringUtils.encodeBase64(data)
 end
 
+-- Posts to the Messages API, retrying transient failures with exponential
+-- backoff (or the server's retry-after hint). Returns LrHttp.post's results.
+local function postWithRetries(bodyJson, headers, progressScope)
+    local attempt = 0
+    while true do
+        local response, hdrs = LrHttp.post(API_URL, bodyJson, headers, "POST", config.REQUEST_TIMEOUT)
+        local status = hdrs and hdrs.status
+        local retryable = (response == nil) or (status ~= nil and RETRYABLE_STATUS[status] == true)
+
+        if not retryable or attempt >= config.MAX_RETRIES or progressScope:isCanceled() then
+            return response, hdrs
+        end
+
+        attempt = attempt + 1
+        local delay = tonumber(getHeader(hdrs, "retry-after")) or 2 ^ attempt
+        delay = math.max(1, math.min(delay, 60))
+        logger:trace(string.format(
+            "Claude API request failed (status %s); retry %d of %d in %d seconds",
+            tostring(status), attempt, config.MAX_RETRIES, delay
+        ))
+        progressScope:setCaption(string.format("Claude is busy, retrying in %d seconds...", delay))
+        LrTasks.sleep(delay)
+    end
+end
+
 local function requestAltTextFromClaude(imageBase64, progressScope)
     progressScope:setCaption("Requesting alt text from Claude...")
 
-    local url = "https://api.anthropic.com/v1/messages"
     local headers = {
         { field = "Content-Type", value = "application/json" },
-        { field = "x-api-key", value = prefs.claudeApiKey },
+        { field = "x-api-key", value = apiKey },
         { field = "anthropic-version", value = config.ANTHROPIC_VERSION },
+        { field = "anthropic-beta", value = config.ANTHROPIC_BETA },
     }
 
     local body = {
         model = config.MODEL,
         max_tokens = config.MAX_TOKENS,
+        output_config = { effort = config.EFFORT },
+        -- Retry declined requests on a fallback model chosen by the server.
+        fallbacks = "default",
         system = config.INSTRUCTIONS,
         messages = {
             {
@@ -143,8 +221,7 @@ local function requestAltTextFromClaude(imageBase64, progressScope)
         }
     }
 
-    local bodyJson = json.encode(body)
-    local response, hdrs = LrHttp.post(url, bodyJson, headers)
+    local response, hdrs = postWithRetries(json.encode(body), headers, progressScope)
 
     if not response then
         -- On a transport-level failure LrHttp.post returns nil plus an info table
@@ -153,74 +230,99 @@ local function requestAltTextFromClaude(imageBase64, progressScope)
         if hdrs and hdrs.error then
             detail = hdrs.error.name or hdrs.error.errorCode or detail
         end
-        logger:trace("Claude API request failed: " .. detail)
-        return nil, "Could not reach the Claude API: " .. detail
+        logger:trace("Claude API request failed: " .. tostring(detail))
+        return nil, "Could not reach the Claude API: " .. tostring(detail)
     end
 
+    local status = hdrs and hdrs.status
     local ok, decoded = pcall(json.decode, response)
-    if not ok then
-        logger:trace("Failed to parse Claude response: " .. sanitizeForLog(response))
+    if not ok or type(decoded) ~= "table" then
+        logger:trace("Failed to parse Claude response (status " .. tostring(status) .. "): " .. sanitizeForLog(response))
         return nil, "Invalid response from Claude"
     end
 
-    if decoded.error and decoded.error.message then
-        logger:trace("Claude API error: " .. sanitizeForLog(json.encode(decoded, { indent = true })))
-        return nil, "Claude error: " .. decoded.error.message
+    if status == 401 then
+        return nil, "Invalid Claude API key. Please check it in the plugin settings."
     end
 
-    local content = decoded.content or {}
-    for _, block in ipairs(content) do
-        if block.type == "text" and block.text then
-            local trimmed = LrStringUtils.trimWhitespace(block.text)
-            if trimmed ~= "" then
-                return trimmed
-            end
+    if decoded.type == "error" or (status and status ~= 200) then
+        logger:trace("Claude API error: " .. sanitizeForLog(json.encode(decoded, { indent = true })))
+        local message = decoded.error and decoded.error.message or ("HTTP status " .. tostring(status))
+        return nil, "Claude error: " .. message
+    end
+
+    if decoded.stop_reason == "refusal" then
+        local category = decoded.stop_details and decoded.stop_details.category
+        logger:trace("Claude declined the request: " .. tostring(category))
+        if type(category) == "string" then
+            return nil, "Claude declined to describe this photo (" .. category .. ")"
+        end
+        return nil, "Claude declined to describe this photo"
+    end
+
+    if decoded.stop_reason == "max_tokens" then
+        -- The reply was cut off; saving it would store truncated alt text.
+        return nil, "Claude's response was cut off before it finished"
+    end
+
+    -- Read blocks by type: the response can begin with (empty) thinking blocks.
+    local texts = {}
+    for _, block in ipairs(decoded.content or {}) do
+        if block.type == "text" and type(block.text) == "string" then
+            table.insert(texts, block.text)
         end
     end
+    local altText = LrStringUtils.trimWhitespace(table.concat(texts))
 
-    logger:trace("Claude returned unexpected response: " .. sanitizeForLog(json.encode(decoded, { indent = true })))
-    return nil, "Claude returned an unexpected response"
-end
-
-local function generateAltTextForPhoto(photo, photoName, progressScope)
-    local metadataField = validateMetadataField(prefs.metadataField)
-
-    local function fail(err)
-        logger:trace("Alt text failed for " .. tostring(photoName) .. ": " .. tostring(err))
-        return false, err
+    if altText == "" then
+        logger:trace("Claude returned unexpected response: " .. sanitizeForLog(json.encode(decoded, { indent = true })))
+        return nil, "Claude returned an unexpected response"
     end
 
-    local resizedFilePath = resizePhoto(photo, progressScope)
+    -- Count UTF-8 characters (not bytes) by skipping continuation bytes.
+    local length = select(2, altText:gsub("[^\128-\191]", ""))
+    if length > config.MAX_ALT_TEXT_LENGTH then
+        logger:trace("Alt text too long (" .. length .. " characters): " .. altText)
+        return nil, "Claude's alt text was longer than " .. config.MAX_ALT_TEXT_LENGTH .. " characters"
+    end
+
+    return altText
+end
+
+local function generateAltTextForPhoto(photo, metadataField, progressScope)
+    local resizedFilePath, tempDirOrError = resizePhoto(photo, progressScope)
     if not resizedFilePath then
-        return fail("Failed to resize photo")
+        return false, tempDirOrError
     end
 
     local base64Image = encodePhotoToBase64(resizedFilePath, progressScope)
-    LrFileUtils.delete(resizedFilePath)
+    LrFileUtils.delete(tempDirOrError)
 
     if not base64Image then
-        return fail("Failed to encode photo")
+        return false, "Failed to encode photo"
     end
 
     local altText, err = requestAltTextFromClaude(base64Image, progressScope)
-
-    if altText then
-        -- setRawMetadata is synchronous, so it's safe to pcall (unlike the
-        -- yielding SDK calls above). This keeps a single bad photo — e.g. an
-        -- unwritable field — from aborting the entire batch.
-        local wrote = false
-        photo.catalog:withWriteAccessDo("Set Alt Text", function()
-            wrote = pcall(function()
-                photo:setRawMetadata(metadataField, altText)
-            end)
-        end)
-        if wrote then
-            return true
-        end
-        return fail("Failed to save alt text")
+    if not altText then
+        return false, err or "Failed to generate alt text"
     end
 
-    return fail(err or "Failed to generate alt text")
+    -- setRawMetadata is synchronous, so a plain pcall is fine here and gives a
+    -- specific message if the field can't be written.
+    local wrote = false
+    local result = photo.catalog:withWriteAccessDo("Set Alt Text", function()
+        wrote = pcall(function()
+            photo:setRawMetadata(metadataField, altText)
+        end)
+    end, { timeout = 30 })
+
+    if result == "aborted" then
+        return false, "Timed out waiting to write to the catalog"
+    end
+    if not wrote then
+        return false, "Failed to save alt text"
+    end
+    return true
 end
 
 LrTasks.startAsyncTask(function()
@@ -233,8 +335,8 @@ LrTasks.startAsyncTask(function()
             return
         end
 
-        local apiKey = prefs.claudeApiKey
-        if not apiKey or apiKey == "" then
+        apiKey = ApiKey.get()
+        if not apiKey then
             LrDialogs.message("Your Claude API key is missing. Please set it up in the plugin manager.")
             return
         end
@@ -242,7 +344,8 @@ LrTasks.startAsyncTask(function()
         -- Re-entrancy guard: prevent a second run from starting while one is in
         -- progress. The flag lives in prefs (each menu click re-runs this file
         -- fresh, so a local variable wouldn't persist) and is cleared by a cleanup
-        -- handler so it resets even if the task errors or is canceled.
+        -- handler so it resets even if the task errors or is canceled. Init.lua
+        -- also clears it at startup in case Lightroom quit mid-run.
         if prefs.isRunning then
             LrDialogs.message("Alt text generation is already running.")
             return
@@ -272,35 +375,39 @@ LrTasks.startAsyncTask(function()
 
             progressScope:setPortionComplete(i - 1, #selectedPhotos)
 
-            local shouldSkip = false
-            if skipExisting then
-                local existing = photo:getFormattedMetadata(metadataField)
-                if existing and existing ~= "" then
-                    shouldSkip = true
-                end
+            local shouldSkip = photo:getRawMetadata('isVideo')
+            if not shouldSkip and skipExisting then
+                shouldSkip = not isBlank(photo:getFormattedMetadata(metadataField))
             end
 
             if shouldSkip then
                 skipped = skipped + 1
             else
                 local photoName = photo:getFormattedMetadata('fileName')
-                local success, err = generateAltTextForPhoto(photo, photoName, progressScope)
+                -- LrTasks.pcall (unlike Lua's pcall) can wrap yielding SDK calls,
+                -- so an unexpected error fails this photo instead of the batch.
+                local ok, success, err = LrTasks.pcall(generateAltTextForPhoto, photo, metadataField, progressScope)
+                if not ok then
+                    err = "Unexpected error: " .. tostring(success)
+                    success = false
+                end
                 if success then
                     successes = successes + 1
                 else
                     failures = failures + 1
-                    if err then
-                        errors[err] = (errors[err] or 0) + 1
-                    end
+                    err = err or "Failed to generate alt text"
+                    logger:trace("Alt text failed for " .. tostring(photoName) .. ": " .. sanitizeForLog(tostring(err)))
+                    errors[err] = (errors[err] or 0) + 1
                 end
             end
 
             progressScope:setPortionComplete(i, #selectedPhotos)
         end
 
+        local canceled = progressScope:isCanceled()
         progressScope:done()
 
-        if progressScope:isCanceled() then
+        if canceled then
             local parts = {"Operation canceled."}
             if successes > 0 then
                 table.insert(parts, successes .. " photo(s) completed before cancellation.")
@@ -329,6 +436,7 @@ LrTasks.startAsyncTask(function()
                     table.insert(errorDetails, err)
                 end
             end
+            table.sort(errorDetails)
             if #errorDetails > 0 then
                 summary = summary .. "\n\n" .. table.concat(errorDetails, "\n")
             end

@@ -1,7 +1,15 @@
 return {
-  MODEL = "claude-sonnet-5",
-  MAX_TOKENS = 512,
+  MODEL = "claude-sonnet-5-5",
+  -- Thinking tokens count against max_tokens, so leave room for them on top of
+  -- the alt text itself.
+  MAX_TOKENS = 4096,
+  EFFORT = "low",
   ANTHROPIC_VERSION = "2023-06-01",
+  ANTHROPIC_BETA = "server-side-fallback-2026-07-01",
+  REQUEST_TIMEOUT = 120,
+  MAX_RETRIES = 3,
+  MAX_ALT_TEXT_LENGTH = 1000,
+  MAX_IMAGE_DIMENSION = 1568,
   DEFAULT_METADATA_FIELD = "caption",
   METADATA_FIELDS = {
     { title = "Caption", value = "caption" },
